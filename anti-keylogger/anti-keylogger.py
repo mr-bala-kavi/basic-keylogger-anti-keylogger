@@ -2,86 +2,101 @@ import sys
 import os
 import psutil
 import subprocess
-from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QTextEdit, QMessageBox
+import threading
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QPushButton, QTextEdit, QMessageBox
+)
+from PyQt6.QtCore import pyqtSignal, QObject, QTimer
+
+class Scanner(QObject):
+    log_signal = pyqtSignal(str)
+    done_signal = pyqtSignal(list)
+
+    def __init__(self):
+        super().__init__()
+
+    def scan(self):
+        suspicious = []
+        keywords = ['keylog', 'pynput', 'keyboard', 'hook', 'record_keys', 'logger', 'input']
+
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
+            try:
+                cmdline = proc.info.get('cmdline') or []
+                exe_path = proc.info.get('exe') or ''
+                name = proc.info.get('name') or ''
+                cmd_str = ' '.join(cmdline).lower()
+
+                if any(k in cmd_str for k in keywords) or any(k in exe_path.lower() for k in keywords) or any(k in name.lower() for k in keywords):
+                    msg = f"[ALERT] Suspicious Process:\n  PID: {proc.pid}\n  Name: {name}\n  Executable: {exe_path}\n  Cmd: {cmd_str}\n{'-'*60}"
+                    self.log_signal.emit(msg)
+                    suspicious.append(proc)
+
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        if not suspicious:
+            self.log_signal.emit("[SAFE] No suspicious keyloggers detected.")
+
+        self.done_signal.emit(suspicious)
+
 
 class AntiKeylogger(QWidget):
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("Windows Anti-Keylogger")
+        self.setGeometry(300, 300, 700, 500)
 
-        self.setWindowTitle("Anti-Keylogger Scanner")
-        self.setGeometry(300, 300, 600, 400)
+        self.suspicious_processes = []
 
         layout = QVBoxLayout()
-
-        self.scan_button = QPushButton("Scan for Keyloggers")
-        self.scan_button.clicked.connect(self.scan_system)
-        layout.addWidget(self.scan_button)
-
         self.result_box = QTextEdit()
         self.result_box.setReadOnly(True)
         layout.addWidget(self.result_box)
 
+        self.scan_button = QPushButton("Scan for Keyloggers")
+        self.scan_button.clicked.connect(self.start_scan)
+        layout.addWidget(self.scan_button)
+
         self.kill_button = QPushButton("Kill Suspicious Processes")
-        self.kill_button.clicked.connect(self.kill_suspicious_processes)
+        self.kill_button.clicked.connect(self.kill_processes)
         layout.addWidget(self.kill_button)
 
         self.setLayout(layout)
 
-    def scan_system(self):
+        self.scanner = Scanner()
+        self.scanner.log_signal.connect(self.update_log)
+        self.scanner.done_signal.connect(self.finish_scan)
+
+    def start_scan(self):
+        self.scan_button.setEnabled(False)
         self.result_box.clear()
-        suspicious_processes = []
-        
-        # Check running processes for keylogging behavior
-        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-            try:
-                if proc.info['cmdline']:
-                    cmdline_str = ' '.join(proc.info['cmdline']).lower()
-                    if any(keyword in cmdline_str for keyword in ['pynput', 'keyboard', 'keylogger']):
-                        suspicious_processes.append(proc)
+        thread = threading.Thread(target=self.scanner.scan)
+        thread.start()
 
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+    def update_log(self, text):
+        self.result_box.append(text)
+
+    def finish_scan(self, processes):
+        self.suspicious_processes = processes
+        self.scan_button.setEnabled(True)
+
+    def kill_processes(self):
+        if not self.suspicious_processes:
+            QMessageBox.information(self, "No Threats", "No suspicious processes found.")
+            return
+
+        for proc in self.suspicious_processes:
+            try:
+                proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
-        # Check for programs accessing keyboard input
-        try:
-            output = subprocess.check_output("lsof /dev/input/event*", shell=True, stderr=subprocess.DEVNULL).decode()
-            if output:
-                self.result_box.append("[ALERT] Suspicious process accessing keyboard input:")
-                self.result_box.append(output)
-        except subprocess.CalledProcessError:
-            self.result_box.append("[INFO] No direct keyboard access detected.")
+        QMessageBox.information(self, "Killed", "Suspicious processes terminated.")
+        self.result_box.append("[INFO] Terminated suspicious processes.")
 
-        if suspicious_processes:
-            self.result_box.append("\n[ALERT] Suspicious Keylogger Processes Detected:")
-            for proc in suspicious_processes:
-                self.result_box.append(f"PID: {proc.info['pid']}, Name: {proc.info['name']}, Cmd: {' '.join(proc.info['cmdline'])}")
-        else:
-            self.result_box.append("[SAFE] No keyloggers detected!")
-
-    def kill_suspicious_processes(self):
-        suspicious_pids = []
-        
-        # Find processes with keylogging behavior
-        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-            try:
-                if proc.info['cmdline']:
-                    cmdline_str = ' '.join(proc.info['cmdline']).lower()
-                    if any(keyword in cmdline_str for keyword in ['pynput', 'keyboard', 'keylogger']):
-                        suspicious_pids.append(proc.info['pid'])
-
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-
-        if suspicious_pids:
-            for pid in suspicious_pids:
-                os.system(f"kill -9 {pid}")
-
-            QMessageBox.information(self, "Action Completed", "Suspicious keylogger processes have been terminated.")
-        else:
-            QMessageBox.information(self, "No Threats Found", "No suspicious keyloggers were detected.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = AntiKeylogger()
-    window.show()
+    win = AntiKeylogger()
+    win.show()
     sys.exit(app.exec())
